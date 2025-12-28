@@ -1,3 +1,11 @@
+# RPG Maker Launcher MKXP-Z Fork
+The main purpose of this fork is to host prebuilt releases and extra files for MKXP-Z.<br>
+<br>
+## Changes
+Most changes here are just quality of life updates or possible bugfixes.
+
+ - Removed Downloads folder check since RPG Maker Launcher already fixes permission issues related to that error
+
 # mkxp-z
 
 <p align="center"><b>
