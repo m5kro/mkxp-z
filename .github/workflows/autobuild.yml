@@ -2,6 +2,7 @@
 name: Automatic Build
 
 on:
+  workflow_dispatch:
   push:
     branches: ['dev', 'autobuild']
     paths-ignore: ['*.md', '*.json', '*.png']
