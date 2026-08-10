@@ -5,6 +5,7 @@ The main purpose of this fork is to host prebuilt releases and extra files for M
 Most changes here are just quality of life updates or possible bugfixes.
 
  - Removed Downloads folder check since RPGM Launcher already fixes permission issues related to that error
+ - Fixed Japanese filename issues
 
 # mkxp-z
 
