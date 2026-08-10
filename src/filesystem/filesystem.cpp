@@ -352,46 +352,38 @@ void FileSystem::removePath(const char *path, bool reload) {
     if (reload) reloadPathCache();
 }
 
+#ifdef __APPLE__
+/* Converts a NFD (decomposed) UTF-8 string to NFC (canonical) in place.
+ * No-op if the string is already NFC. */
+static void toNFC(char *inout) {
+    static thread_local iconv_t cd = []() {
+        iconv_t c = iconv_open("utf-8", "utf-8-mac");
+        return c == (iconv_t)-1 ? (iconv_t)0 : c;
+    }();
+    if (!cd)
+        return;
+
+    size_t srcSize = strlen(inout);
+    static thread_local char buf[512];
+    char *bufPtr = buf;
+    char *inoutPtr = inout;
+    size_t bufSize = sizeof(buf) - 1;
+
+    iconv(cd, &inoutPtr, &srcSize, &bufPtr, &bufSize);
+    *bufPtr = 0;
+    strcpy(inout, buf);
+}
+#else
+static void toNFC(char *inout) {
+    (void)inout;
+}
+#endif
+
 struct CacheEnumData {
   FileSystemPrivate *p;
   std::stack<std::vector<std::string> *> fileLists;
 
-#ifdef __APPLE__
-  iconv_t nfd2nfc;
-  char buf[512];
-#endif
-
-  CacheEnumData(FileSystemPrivate *p) : p(p) {
-#ifdef __APPLE__
-    nfd2nfc = iconv_open("utf-8", "utf-8-mac");
-#endif
-  }
-
-  ~CacheEnumData() {
-#ifdef __APPLE__
-    iconv_close(nfd2nfc);
-#endif
-  }
-
-  /* Converts in-place */
-  void toNFC(char *inout) {
-#ifdef __APPLE__
-    size_t srcSize = strlen(inout);
-    size_t bufSize = sizeof(buf);
-    char *bufPtr = buf;
-    char *inoutPtr = inout;
-
-    /* Reserve room for null terminator */
-    --bufSize;
-
-    iconv(nfd2nfc, &inoutPtr, &srcSize, &bufPtr, &bufSize);
-    /* Null-terminate */
-    *bufPtr = 0;
-    strcpy(inout, buf);
-#else
-    (void)inout;
-#endif
-  }
+  CacheEnumData(FileSystemPrivate *p) : p(p) {}
 };
 
 static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
@@ -400,22 +392,29 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
     throw Exception(Exception::MKXPError, "Game close requested. Aborting path cache enumeration.");
 
   CacheEnumData &data = *static_cast<CacheEnumData *>(d);
-  char fullPath[512];
+
+  /* On-disk (NFD on macOS) path, used for PhysFS calls and stored as the
+   * mixed-case value in the path cache so the real file is found. */
+  char onDiskPath[512];
 
   if (!*origdir)
-    snprintf(fullPath, sizeof(fullPath), "%s", fname);
+    snprintf(onDiskPath, sizeof(onDiskPath), "%s", fname);
   else
-    snprintf(fullPath, sizeof(fullPath), "%s/%s", origdir, fname);
+    snprintf(onDiskPath, sizeof(onDiskPath), "%s/%s", origdir, fname);
 
-  /* Deal with OSX' weird UTF-8 standards */
-  data.toNFC(fullPath);
+  /* Canonical NFC form, used as the cache key so that both NFC and NFD
+   * requests resolve to the same entry. */
+  char nfcPath[512];
+  strncpy(nfcPath, onDiskPath, sizeof(nfcPath) - 1);
+  nfcPath[sizeof(nfcPath) - 1] = '\0';
+  toNFC(nfcPath);
 
-  std::string mixedCase(fullPath);
-  std::string lowerCase = mixedCase;
+  std::string mixedCase(onDiskPath);
+  std::string lowerCase(nfcPath);
   strTolower(lowerCase);
 
   PHYSFS_Stat stat;
-  PHYSFS_stat(fullPath, &stat);
+  PHYSFS_stat(onDiskPath, &stat);
 
   if (stat.filetype == PHYSFS_FILETYPE_DIRECTORY) {
     /* Create a new list for this directory */
@@ -423,14 +422,20 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
 
     /* Iterate over its contents */
     data.fileLists.push(&list);
-    PHYSFS_enumerate(fullPath, cacheEnumCB, d);
+    PHYSFS_enumerate(onDiskPath, cacheEnumCB, d);
     data.fileLists.pop();
   } else {
     /* Get the file list for the directory we're currently
      * traversing and append this filename to it */
     std::vector<std::string> &list = *data.fileLists.top();
 
-    std::string lowerFilename(fname);
+    /* Store the filename in canonical NFC so it matches the NFC-normalized
+     * request used during path cache lookups. */
+    char nfcName[512];
+    strncpy(nfcName, fname, sizeof(nfcName) - 1);
+    nfcName[sizeof(nfcName) - 1] = '\0';
+    toNFC(nfcName);
+    std::string lowerFilename(nfcName);
     strTolower(lowerFilename);
     list.push_back(lowerFilename);
 
@@ -617,9 +622,14 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
   size_t len = strcpySafe(buffer, filename_nm.c_str(), sizeof(buffer), -1);
   char *delim;
 
-  if (p->havePathCache)
+  if (p->havePathCache) {
+    /* Canonicalize the request to NFC so it matches the NFC keys and
+     * file lists stored in the path cache. */
+    toNFC(buffer);
+    len = strlen(buffer);
     for (size_t i = 0; i < len; ++i)
       buffer[i] = tolower(buffer[i]);
+  }
 
   /* Find the deliminator separating directory and file name */
   for (delim = buffer + len; delim > buffer; --delim)
